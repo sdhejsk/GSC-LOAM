@@ -1,0 +1,2 @@
+SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM:SC-LeGO-LOAM/SC-LeGO-LOAM/cloud_msgs
+-DCATKIN_DEVEL_PREFIX=/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/devel -DCMAKE_INSTALL_PREFIX=/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/install -G Unix Makefiles
