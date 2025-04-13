@@ -43,6 +43,7 @@ private:
     ros::Subscriber subLaserCloud;
     ros::Subscriber subLaserCloudInfo;
     ros::Subscriber subOutlierCloud;
+    ros::Subscriber subGroundCloud;
     ros::Subscriber subImu;
 
     ros::Publisher pubCornerPointsSharp;
@@ -52,6 +53,7 @@ private:
 
     pcl::PointCloud<PointType>::Ptr segmentedCloud;
     pcl::PointCloud<PointType>::Ptr outlierCloud;
+    pcl::PointCloud<PointType>::Ptr GroundCloud;
 
     pcl::PointCloud<PointType>::Ptr cornerPointsSharp;
     pcl::PointCloud<PointType>::Ptr cornerPointsLessSharp;
@@ -67,10 +69,12 @@ private:
     double timeNewSegmentedCloud;
     double timeNewSegmentedCloudInfo;
     double timeNewOutlierCloud;
+    double timeNewGroundCloud;
 
     bool newSegmentedCloud;
     bool newSegmentedCloudInfo;
     bool newOutlierCloud;
+    bool newGroundCloud;
 
     cloud_msgs::cloud_info segInfo;
     std_msgs::Header cloudHeader;
@@ -135,6 +139,7 @@ private:
     ros::Publisher pubLaserCloudSurfLast;
     ros::Publisher pubLaserOdometry;
     ros::Publisher pubOutlierCloudLast;
+    ros::Publisher pubGroundCloudLast;
 
     int skipFrameNum;
     bool systemInitedLM;
@@ -190,6 +195,7 @@ public:
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>("/segmented_cloud", 100, &FeatureAssociation::laserCloudHandler, this);
         subLaserCloudInfo = nh.subscribe<cloud_msgs::cloud_info>("/segmented_cloud_info", 100, &FeatureAssociation::laserCloudInfoHandler, this);
         subOutlierCloud = nh.subscribe<sensor_msgs::PointCloud2>("/outlier_cloud", 100, &FeatureAssociation::outlierCloudHandler, this);
+        subGroundCloud = nh.subscribe<sensor_msgs::PointCloud2>("/ground_cloud", 100, &FeatureAssociation::GroundCloudHandler, this);
         subImu = nh.subscribe<sensor_msgs::Imu>(imuTopic, 50, &FeatureAssociation::imuHandler, this);
 
         pubCornerPointsSharp = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_sharp", 100);
@@ -200,6 +206,7 @@ public:
         pubLaserCloudCornerLast = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_corner_last", 100);
         pubLaserCloudSurfLast = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_surf_last", 100);
         pubOutlierCloudLast = nh.advertise<sensor_msgs::PointCloud2>("/outlier_cloud_last", 100);
+        pubGroundCloudLast = nh.advertise<sensor_msgs::PointCloud2>("/ground_cloud_last", 100);
         pubLaserOdometry = nh.advertise<nav_msgs::Odometry> ("/laser_odom_to_init", 100);
         
         initializationValue();
@@ -225,6 +232,7 @@ public:
         downSizeFilter.setLeafSize(0.1, 0.1, 0.1);
 
         segmentedCloud.reset(new pcl::PointCloud<PointType>());
+        GroundCloud.reset(new pcl::PointCloud<PointType>());
         outlierCloud.reset(new pcl::PointCloud<PointType>());
 
         cornerPointsSharp.reset(new pcl::PointCloud<PointType>());
@@ -239,10 +247,12 @@ public:
         timeNewSegmentedCloud = 0;
         timeNewSegmentedCloudInfo = 0;
         timeNewOutlierCloud = 0;
+        timeNewGroundCloud = 0;
 
         newSegmentedCloud = false;
         newSegmentedCloudInfo = false;
         newOutlierCloud = false;
+        newGroundCloud = false;
 
         systemInitCount = 0;
         systemInited = false;
@@ -470,6 +480,15 @@ public:
 
         newSegmentedCloud = true;
     }
+    
+    void GroundCloudHandler(const sensor_msgs::PointCloud2ConstPtr& GroundCloudMsg){
+        timeNewGroundCloud = GroundCloudMsg->header.stamp.toSec();
+
+        GroundCloud->clear();
+        pcl::fromROSMsg(*GroundCloudMsg, *GroundCloud);
+
+        newGroundCloud = true;
+    }
 
     void outlierCloudHandler(const sensor_msgs::PointCloud2ConstPtr& msgIn){
 
@@ -492,6 +511,7 @@ public:
     {
         bool halfPassed = false;
         int cloudSize = segmentedCloud->points.size();
+        int groundsize = GroundCloud->points.size();
 
         PointType point;
 
@@ -613,6 +633,38 @@ public:
                 }
             }
             segmentedCloud->points[i] = point;
+        }
+
+        halfPassed = false;
+
+        for (int i = 0; i < groundsize; i++) {
+
+            point.x = GroundCloud->points[i].y;
+            point.y = GroundCloud->points[i].z;
+            point.z = GroundCloud->points[i].x;
+
+            float ori = -atan2(point.x, point.z);
+            if (!halfPassed) {
+                if (ori < segInfo.startOrientation - M_PI / 2)
+                    ori += 2 * M_PI;
+                else if (ori > segInfo.startOrientation + M_PI * 3 / 2)
+                    ori -= 2 * M_PI;
+
+                if (ori - segInfo.startOrientation > M_PI)
+                    halfPassed = true;
+            } else {
+                ori += 2 * M_PI;
+
+                if (ori < segInfo.endOrientation - M_PI * 3 / 2)
+                    ori += 2 * M_PI;
+                else if (ori > segInfo.endOrientation + M_PI / 2)
+                    ori -= 2 * M_PI;
+            }
+
+            float relTime = (ori - segInfo.startOrientation) / segInfo.orientationDiff;
+            point.intensity = int(GroundCloud->points[i].intensity) + scanPeriod * relTime;
+            
+            GroundCloud->points[i] = point;
         }
 
         imuPointerLastIteration = imuPointerLast;
@@ -1630,6 +1682,12 @@ public:
         laserCloudSurfLast2.header.frame_id = "/camera";
         pubLaserCloudSurfLast.publish(laserCloudSurfLast2);
 
+        sensor_msgs::PointCloud2 laserCloudGroundLast2;
+        pcl::toROSMsg(*GroundCloud, laserCloudGroundLast2);
+        laserCloudGroundLast2.header.stamp = cloudHeader.stamp;
+        laserCloudGroundLast2.header.frame_id = "/camera";
+        pubGroundCloudLast.publish(laserCloudGroundLast2);
+
         transformSum[0] += imuPitchStart;
         transformSum[2] += imuRollStart;
 
@@ -1771,9 +1829,15 @@ public:
             TransformToEnd(&surfPointsLessFlat->points[i], &surfPointsLessFlat->points[i]);
         }
 
+        int GroundCloudNum = GroundCloud->points.size();
+        for (int i = 0; i < GroundCloudNum; i++) {
+            TransformToEnd(&GroundCloud->points[i], &GroundCloud->points[i]);
+        }
+
         pcl::PointCloud<PointType>::Ptr laserCloudTemp = cornerPointsLessSharp;
         cornerPointsLessSharp = laserCloudCornerLast;
         laserCloudCornerLast = laserCloudTemp;
+
 
         laserCloudTemp = surfPointsLessFlat;
         surfPointsLessFlat = laserCloudSurfLast;
@@ -1811,19 +1875,27 @@ public:
             laserCloudSurfLast2.header.stamp = cloudHeader.stamp;
             laserCloudSurfLast2.header.frame_id = "/camera";
             pubLaserCloudSurfLast.publish(laserCloudSurfLast2);
+
+            sensor_msgs::PointCloud2 laserCloudGroundLast2;
+            pcl::toROSMsg(*GroundCloud, laserCloudGroundLast2);
+            laserCloudGroundLast2.header.stamp = cloudHeader.stamp;
+            laserCloudGroundLast2.header.frame_id = "/camera";
+            pubGroundCloudLast.publish(laserCloudGroundLast2);
         }
     }
 
     void runFeatureAssociation()
     {
 
-        if (newSegmentedCloud && newSegmentedCloudInfo && newOutlierCloud &&
+        if (newSegmentedCloud && newSegmentedCloudInfo && newOutlierCloud && newGroundCloud && 
             std::abs(timeNewSegmentedCloudInfo - timeNewSegmentedCloud) < 0.05 &&
-            std::abs(timeNewOutlierCloud - timeNewSegmentedCloud) < 0.05){
+            std::abs(timeNewOutlierCloud - timeNewSegmentedCloud) < 0.05 && 
+            std::abs(timeNewGroundCloud - timeNewSegmentedCloud) < 0.05){
 
             newSegmentedCloud = false;
             newSegmentedCloudInfo = false;
             newOutlierCloud = false;
+            newGroundCloud = false;
         }else{
             return;
         }

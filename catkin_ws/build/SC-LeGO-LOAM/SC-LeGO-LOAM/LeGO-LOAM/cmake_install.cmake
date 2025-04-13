@@ -37,29 +37,23 @@ if(NOT DEFINED CMAKE_CROSSCOMPILING)
   set(CMAKE_CROSSCOMPILING "FALSE")
 endif()
 
-# Set path to fallback-tool for dependency-resolution.
+# Set default install directory permissions.
 if(NOT DEFINED CMAKE_OBJDUMP)
   set(CMAKE_OBJDUMP "/usr/bin/objdump")
 endif()
 
-if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig" TYPE FILE FILES "/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/build/SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM/catkin_generated/installspace/lego_loam.pc")
 endif()
 
-if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/lego_loam/cmake" TYPE FILE FILES
     "/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/build/SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM/catkin_generated/installspace/lego_loamConfig.cmake"
     "/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/build/SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM/catkin_generated/installspace/lego_loamConfig-version.cmake"
     )
 endif()
 
-if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/lego_loam" TYPE FILE FILES "/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/src/SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM/package.xml")
 endif()
 
-string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
-       "${CMAKE_INSTALL_MANIFEST_FILES}")
-if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "/home/sunhr/FOR-SC-LeGO-LOAM/catkin_ws/build/SC-LeGO-LOAM/SC-LeGO-LOAM/LeGO-LOAM/install_local_manifest.txt"
-     "${CMAKE_INSTALL_MANIFEST_CONTENT}")
-endif()

@@ -40,15 +40,24 @@
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/nonlinear/Values.h>
+#include <pcl/segmentation/sac_segmentation.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
 
 #include "Scancontext.h"
 #include "utility.h"
+#include "PlaneAlignmentFactor.h"  // 实现的因子
+#include "Plane3.h"
 
 using namespace gtsam;
 
 std::string TUM_PATH;
+
+struct GroundPlaneNode {
+    Plane3 plane;                    // 平面对象（封装了 normal + d）
+    double timestamp;               // 更新时间戳
+    int nodeId;                     // 在因子图中的节点 ID
+};
 
 class mapOptimization{
 
@@ -78,6 +87,7 @@ private:
 
     ros::Subscriber subLaserCloudRaw;
     ros::Subscriber subLaserCloudCornerLast;
+    ros::Subscriber subLaserCloudGroundLast;
     ros::Subscriber subLaserCloudSurfLast;
     ros::Subscriber subOutlierCloudLast;
     ros::Subscriber subLaserOdometry;
@@ -88,6 +98,7 @@ private:
     tf::TransformBroadcaster tfBroadcaster;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
+    vector<pcl::PointCloud<PointType>::Ptr> groundCloudKeyFrames;
     vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
     vector<pcl::PointCloud<PointType>::Ptr> outlierCloudKeyFrames;
 
@@ -114,8 +125,10 @@ private:
     pcl::PointCloud<PointType>::Ptr laserCloudRaw; 
     pcl::PointCloud<PointType>::Ptr laserCloudRawDS; 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
+    pcl::PointCloud<PointType>::Ptr laserCloudGroundLast;
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLastDS; // downsampled corner featuer set from odoOptimization
+    pcl::PointCloud<PointType>::Ptr laserCloudGroundLastDS;
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLastDS; // downsampled surf featuer set from odoOptimization
 
     pcl::PointCloud<PointType>::Ptr laserCloudOutlierLast; // corner feature set from odoOptimization
@@ -162,6 +175,7 @@ private:
 
     pcl::VoxelGrid<PointType> downSizeFilterScancontext;
     pcl::VoxelGrid<PointType> downSizeFilterCorner;
+    pcl::VoxelGrid<PointType> downSizeFilterGround;
     pcl::VoxelGrid<PointType> downSizeFilterSurf;
     pcl::VoxelGrid<PointType> downSizeFilterOutlier;
     pcl::VoxelGrid<PointType> downSizeFilterHistoryKeyFrames; // for histor key frames of loop closure
@@ -170,6 +184,7 @@ private:
     pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames; // for global map visualization
 
     double timeLaserCloudCornerLast;
+    double timeLaserCloudGroundLast;
     double timeLaserCloudSurfLast;
     double timeLaserOdometry;
     double timeLaserCloudOutlierLast;
@@ -179,6 +194,8 @@ private:
     bool newLaserCloudSurfLast;
     bool newLaserOdometry;
     bool newLaserCloudOutlierLast;
+    bool newLaserCloudGroundLast;
+
 
 
     float transformLast[6];
@@ -234,6 +251,14 @@ private:
 
     // // loop detector 
     SCManager scManager;
+    // 地面约束相关
+    std::vector<GroundPlaneNode> groundPlaneNodes;
+    double lastGroundPlaneUpdateTime;
+    double groundPlaneUpdateInterval;
+    int minGroundPoints;
+
+    gtsam::noiseModel::Diagonal::shared_ptr groundNoiseModel;
+
 
 public:
 
@@ -252,6 +277,8 @@ public:
         subLaserCloudRaw = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 100, &mapOptimization::laserCloudRawHandler, this);
         subLaserCloudCornerLast = nh.subscribe<sensor_msgs::PointCloud2>("/laser_cloud_corner_last", 100, &mapOptimization::laserCloudCornerLastHandler, this);
         subLaserCloudSurfLast = nh.subscribe<sensor_msgs::PointCloud2>("/laser_cloud_surf_last", 100, &mapOptimization::laserCloudSurfLastHandler, this);
+        subLaserCloudGroundLast = nh.subscribe<sensor_msgs::PointCloud2>("/ground_cloud_last", 100, &mapOptimization::laserCloudGroundLastHandler, this);
+        
         subOutlierCloudLast = nh.subscribe<sensor_msgs::PointCloud2>("/outlier_cloud_last", 100, &mapOptimization::laserCloudOutlierLastHandler, this);
         subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/laser_odom_to_init", 100, &mapOptimization::laserOdometryHandler, this);
         subImu = nh.subscribe<sensor_msgs::Imu> (imuTopic, 50, &mapOptimization::imuHandler, this);
@@ -263,6 +290,7 @@ public:
 
         float filter_size;
         downSizeFilterCorner.setLeafSize(0.2, 0.2, 0.2);
+        downSizeFilterGround.setLeafSize(0.2, 0.2, 0.2);
         filter_size = 0.5; downSizeFilterScancontext.setLeafSize(filter_size, filter_size, filter_size);
         filter_size = 0.3; downSizeFilterSurf.setLeafSize(filter_size, filter_size, filter_size); // default 0.4;
         downSizeFilterOutlier.setLeafSize(0.4, 0.4, 0.4);
@@ -279,9 +307,107 @@ public:
         aftMappedTrans.frame_id_ = "/camera_init";
         aftMappedTrans.child_frame_id_ = "/aft_mapped";
 
+        lastGroundPlaneUpdateTime = 0;
+        groundPlaneUpdateInterval = 5.0;
+        minGroundPoints = 100;
+
+        gtsam::Vector6 noise;
+        noise << 1.0, 1.0, 0.1, 1e3, 1e3, 1e3;
+        groundNoiseModel = gtsam::noiseModel::Diagonal::Variances(noise);
+
         allocateMemory();
     }
 
+    pcl::PointCloud<PointType>::Ptr getGroundCloudForFrame(int index) {
+        if (index < 0 || index >= groundCloudKeyFrames.size()) {
+            return nullptr;
+        }
+        return groundCloudKeyFrames[index];
+    }
+
+    void updateGroundPlaneNode() {
+        if (timeLaserOdometry - lastGroundPlaneUpdateTime < groundPlaneUpdateInterval) return;
+    
+        pcl::PointCloud<PointType>::Ptr recentGroundPoints(new pcl::PointCloud<PointType>());
+        for (int i = std::max(0, (int)cloudKeyPoses3D->points.size() - 10); i < cloudKeyPoses3D->points.size(); ++i) {
+            pcl::PointCloud<PointType>::Ptr frameGroundCloud = getGroundCloudForFrame(i);
+            if (!frameGroundCloud || frameGroundCloud->points.size() < minGroundPoints) continue;
+            
+            /*
+            Eigen::Affine3f transform = pclPointToAffine3fCameraToLidar(cloudKeyPoses6D->points[i]);
+            pcl::PointCloud<PointType>::Ptr transformedCloud(new pcl::PointCloud<PointType>());
+            pcl::transformPointCloud(*frameGroundCloud, *transformedCloud, transform);
+            */
+            
+            PointTypePose thisTransformation = cloudKeyPoses6D->points[i];
+            updateTransformPointCloudSinCos(&thisTransformation);
+            *recentGroundPoints += *transformPointCloud(frameGroundCloud);
+        }
+    
+        if (recentGroundPoints->points.size() >= minGroundPoints) {
+            Plane3 groundPlane;
+            if (fitGroundPlane(recentGroundPoints, groundPlane)) {
+                GroundPlaneNode node;
+                node.plane = groundPlane;
+                node.timestamp = timeLaserOdometry;
+                node.nodeId = groundPlaneNodes.size() + 10000;
+    
+                groundPlaneNodes.push_back(node);
+                lastGroundPlaneUpdateTime = timeLaserOdometry;
+    
+                // gtSAMgraph.add(PriorFactor<Plane3>(node.nodeId, groundPlane, groundNoiseModel));
+                // values.insert(node.nodeId, groundPlane);
+            }
+        }
+    }
+    
+    bool fitGroundPlane(const pcl::PointCloud<PointType>::Ptr& groundCloud, Plane3& plane) {
+        pcl::ModelCoefficients::Ptr coeff(new pcl::ModelCoefficients);
+        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    
+        pcl::SACSegmentation<PointType> seg;
+        seg.setOptimizeCoefficients(true);
+        seg.setModelType(pcl::SACMODEL_PLANE);
+        seg.setMethodType(pcl::SAC_RANSAC);
+        seg.setDistanceThreshold(0.03);
+        seg.setInputCloud(groundCloud);
+        seg.segment(*inliers, *coeff);
+    
+        if (inliers->indices.size() < minGroundPoints) return false;
+    
+        Eigen::Vector3d normal(coeff->values[0], coeff->values[1], coeff->values[2]);
+        double d = coeff->values[3];
+        plane = Plane3(normal, d);
+        return true;
+    }
+    
+    void addGroundPlaneConstraints() {
+        if (groundPlaneNodes.empty()) return;
+    
+        const GroundPlaneNode& groundNode = groundPlaneNodes.back();
+        int recentFrames = 5;
+    
+        for (int i = std::max(0, (int)cloudKeyPoses3D->points.size() - recentFrames);
+             i < cloudKeyPoses3D->points.size(); ++i) {
+    
+            pcl::PointCloud<PointType>::Ptr frameGroundCloud = getGroundCloudForFrame(i);
+            if (!frameGroundCloud || frameGroundCloud->points.size() < minGroundPoints) continue;
+
+            PointTypePose thisTransformation = cloudKeyPoses6D->points[i];
+            updateTransformPointCloudSinCos(&thisTransformation);
+            
+    
+            Plane3 localPlane;
+            if (!fitGroundPlane(transformPointCloud(frameGroundCloud), localPlane)) continue;
+    
+            gtsam::Key poseKey = i;
+            // gtsam::Key planeKey = groundNode.nodeId;
+    
+            gtSAMgraph.add(boost::make_shared<PlaneAlignmentFactor>(
+                poseKey, groundNode.plane, localPlane, groundNoiseModel));
+        }
+    }
+    
     void allocateMemory(){
 
         cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
@@ -296,8 +422,10 @@ public:
         laserCloudRaw.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
         laserCloudRawDS.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
         laserCloudCornerLast.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
+        laserCloudGroundLast.reset(new pcl::PointCloud<PointType>());
         laserCloudSurfLast.reset(new pcl::PointCloud<PointType>()); // surf feature set from odoOptimization
         laserCloudCornerLastDS.reset(new pcl::PointCloud<PointType>()); // downsampled corner featuer set from odoOptimization
+        laserCloudGroundLastDS.reset(new pcl::PointCloud<PointType>());
         laserCloudSurfLastDS.reset(new pcl::PointCloud<PointType>()); // downsampled surf featuer set from odoOptimization
         laserCloudOutlierLast.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
         laserCloudOutlierLastDS.reset(new pcl::PointCloud<PointType>()); // downsampled corner feature set from odoOptimization
@@ -336,6 +464,7 @@ public:
         globalMapKeyFramesDS.reset(new pcl::PointCloud<PointType>());
 
         timeLaserCloudCornerLast = 0;
+        timeLaserCloudGroundLast = 0;
         timeLaserCloudSurfLast = 0;
         timeLaserOdometry = 0;
         timeLaserCloudOutlierLast = 0;
@@ -348,6 +477,7 @@ public:
 
         newLaserOdometry = false;
         newLaserCloudOutlierLast = false;
+        newLaserCloudGroundLast = false;
 
         for (int i = 0; i < 6; ++i){
             transformLast[i] = 0;
@@ -645,6 +775,12 @@ public:
         laserCloudCornerLast->clear();
         pcl::fromROSMsg(*msg, *laserCloudCornerLast);
         newLaserCloudCornerLast = true;
+    }
+    void laserCloudGroundLastHandler(const sensor_msgs::PointCloud2ConstPtr& msg){
+        timeLaserCloudGroundLast = msg->header.stamp.toSec();
+        laserCloudGroundLast->clear();
+        pcl::fromROSMsg(*msg, *laserCloudGroundLast);
+        newLaserCloudGroundLast = true;
     }
 
     void laserCloudSurfLastHandler(const sensor_msgs::PointCloud2ConstPtr& msg){
@@ -1247,6 +1383,10 @@ public:
         laserCloudCornerLastDSNum = laserCloudCornerLastDS->points.size();
         // std::cout << "laserCloudCornerLastDSNum: " << laserCloudCornerLastDSNum << std::endl;
 
+        laserCloudGroundLastDS->clear();
+        downSizeFilterGround.setInputCloud(laserCloudGroundLast);
+        downSizeFilterGround.filter(*laserCloudGroundLastDS);
+
         laserCloudSurfLastDS->clear();
         downSizeFilterSurf.setInputCloud(laserCloudSurfLast);
         downSizeFilterSurf.filter(*laserCloudSurfLastDS);
@@ -1563,6 +1703,10 @@ public:
             initialEstimate.insert(cloudKeyPoses3D->points.size(), Pose3(Rot3::RzRyRx(transformAftMapped[2], transformAftMapped[0], transformAftMapped[1]),
                                                                      		   Point3(transformAftMapped[5], transformAftMapped[3], transformAftMapped[4])));
         }
+
+        updateGroundPlaneNode();
+        addGroundPlaneConstraints();
+
         /**
          * update iSAM
          */
@@ -1618,8 +1762,10 @@ public:
         pcl::PointCloud<PointType>::Ptr thisCornerKeyFrame(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisSurfKeyFrame(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisOutlierKeyFrame(new pcl::PointCloud<PointType>());
+        pcl::PointCloud<PointType>::Ptr thisGroundKeyFrame(new pcl::PointCloud<PointType>());
 
         pcl::copyPointCloud(*laserCloudCornerLastDS,  *thisCornerKeyFrame);
+        pcl::copyPointCloud(*laserCloudGroundLastDS, *thisGroundKeyFrame);
         pcl::copyPointCloud(*laserCloudSurfLastDS,    *thisSurfKeyFrame);
         pcl::copyPointCloud(*laserCloudOutlierLastDS, *thisOutlierKeyFrame);
 
@@ -1641,6 +1787,7 @@ public:
         cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
         surfCloudKeyFrames.push_back(thisSurfKeyFrame);
         outlierCloudKeyFrames.push_back(thisOutlierKeyFrame);
+        groundCloudKeyFrames.push_back(thisGroundKeyFrame);
     } // saveKeyFramesAndFactor
 
 
@@ -1680,11 +1827,12 @@ public:
         if (newLaserCloudCornerLast  && std::abs(timeLaserCloudCornerLast  - timeLaserOdometry) < 0.005 &&
             newLaserCloudSurfLast    && std::abs(timeLaserCloudSurfLast    - timeLaserOdometry) < 0.005 &&
             newLaserCloudOutlierLast && std::abs(timeLaserCloudOutlierLast - timeLaserOdometry) < 0.005 &&
+            newLaserCloudGroundLast  && std::abs(timeLaserCloudGroundLast - timeLaserOdometry) < 0.005 && 
             newLaserOdometry)
         {
 
             newLaserCloudCornerLast = false; newLaserCloudSurfLast = false; newLaserCloudOutlierLast = false; newLaserOdometry = false;
-
+            newLaserCloudGroundLast = false;
             std::lock_guard<std::mutex> lock(mtx);
 
             if (timeLaserOdometry - timeLastProcessing >= mappingProcessInterval) {
